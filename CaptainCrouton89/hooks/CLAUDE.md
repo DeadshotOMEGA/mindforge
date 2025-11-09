@@ -1,0 +1,1 @@
+If you are working with hook logic, *strongly consider reading* ~/.claude/docs/external/hooks.md

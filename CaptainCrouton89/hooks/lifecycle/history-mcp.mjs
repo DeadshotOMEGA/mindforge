@@ -1,0 +1,333 @@
+#!/usr/bin/env node
+
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
+
+const LOG_PATH = '~/.claude/mcp-server-debug.log';
+function log(message) {
+  const logLine = `[${new Date().toISOString()}] [history-mcp] ${message}\n`;
+  appendFileSync(LOG_PATH, logLine, 'utf-8');
+  console.error(logLine.trim()); // Also log to stderr for debugging
+}
+
+const HISTORY_FILE = '.claude/memory/history.md';
+const ARCHIVE_FILE = '.claude/memory/archive.jsonl';
+
+function getHistoryPath(cwd) {
+  return join(cwd, HISTORY_FILE);
+}
+
+function getArchivePath(cwd) {
+  return join(cwd, ARCHIVE_FILE);
+}
+
+function getMemoryDir(cwd) {
+  return join(cwd, '.claude/memory');
+}
+
+function ensureHistoryFile(cwd) {
+  const memoryDir = getMemoryDir(cwd);
+  const historyPath = getHistoryPath(cwd);
+
+  if (!existsSync(memoryDir)) {
+    log(`Creating directory: ${memoryDir}`);
+    mkdirSync(memoryDir, { recursive: true });
+  }
+
+  if (!existsSync(historyPath)) {
+    const now = new Date().toISOString();
+    const template = `---
+created: ${now}
+last_updated: ${now}
+archive: .claude/memory/archive.jsonl
+---
+
+> **Extended History:** For complete project history beyond the 250-line limit, see [archive.jsonl](./archive.jsonl)
+
+`;
+    log(`Creating history file: ${historyPath}`);
+    writeFileSync(historyPath, template, 'utf-8');
+  } else {
+    // Ensure existing file has archive link in header
+    ensureArchiveHeader(cwd);
+  }
+}
+
+function ensureArchiveHeader(cwd) {
+  const historyPath = getHistoryPath(cwd);
+  const content = readFileSync(historyPath, 'utf-8');
+
+  // Check if archive already referenced
+  if (content.includes('archive.jsonl')) {
+    return;
+  }
+
+  try {
+    const { frontmatter, body } = parseFrontmatter(content);
+
+    // Add archive field to frontmatter if missing
+    let updatedFrontmatter = frontmatter;
+    if (!frontmatter.includes('archive:')) {
+      updatedFrontmatter = frontmatter + '\narchive: .claude/memory/archive.jsonl';
+    }
+
+    // Add archive reference after frontmatter if missing
+    const archiveSection = '\n> **Extended History:** For complete project history beyond the 250-line limit, see [archive.jsonl](./archive.jsonl)\n';
+    const newContent = `---\n${updatedFrontmatter}\n---\n${archiveSection}\n${body}`;
+
+    writeFileSync(historyPath, newContent, 'utf-8');
+    log('Added archive header to existing history.md');
+  } catch (error) {
+    log(`Could not add archive header: ${error.message}`);
+  }
+}
+
+function parseFrontmatter(content) {
+  const frontmatterRegex = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
+  const match = content.match(frontmatterRegex);
+
+  if (!match) {
+    throw new Error('Invalid history.md format: missing frontmatter');
+  }
+
+  return {
+    frontmatter: match[1],
+    body: match[2],
+  };
+}
+
+function updateFrontmatterTimestamp(frontmatter) {
+  const now = new Date().toISOString();
+  const lines = frontmatter.split('\n');
+  const updatedLines = lines.map(line => {
+    if (line.startsWith('last_updated:')) {
+      return `last_updated: ${now}`;
+    }
+    return line;
+  });
+  return updatedLines.join('\n');
+}
+
+function formatEntry(title, bullets) {
+  const today = new Date();
+  const dateStr = today.toISOString().split('T')[0]; // YYYY-MM-DD
+
+  let entry = `## ${dateStr}: ${title}\n\n`;
+
+  for (const bullet of bullets) {
+    entry += `- ${bullet.text}\n`;
+    if (bullet.subbullets && bullet.subbullets.length > 0) {
+      for (const subbullet of bullet.subbullets) {
+        entry += `  - ${subbullet}\n`;
+      }
+    }
+  }
+
+  entry += '\n';
+  return entry;
+}
+
+function appendToArchive(cwd, title, bullets, sessionId, gitCommit) {
+  const archivePath = getArchivePath(cwd);
+  const timestamp = new Date().toISOString();
+  const date = timestamp.split('T')[0];
+
+  const archiveEntry = {
+    timestamp,
+    date,
+    sessionId,
+    cwd,
+    ...(gitCommit && { gitCommit }),
+    title,
+    bullets,
+  };
+
+  try {
+    const tempPath = join(tmpdir(), `archive-${Date.now()}.tmp`);
+    const jsonLine = JSON.stringify(archiveEntry) + '\n';
+
+    writeFileSync(tempPath, jsonLine, 'utf-8');
+
+    // Atomic append via rename
+    if (existsSync(archivePath)) {
+      const existing = readFileSync(archivePath, 'utf-8');
+      writeFileSync(tempPath, existing + jsonLine, 'utf-8');
+    }
+
+    renameSync(tempPath, archivePath);
+    log(`Appended to archive: ${title}`);
+  } catch (error) {
+    log(`ERROR appending to archive: ${error.message}`);
+    // Don't throw - archive failure shouldn't block history.md
+  }
+}
+
+function logHistoryEntry(cwd, title, bullets, sessionId, gitCommit) {
+  ensureHistoryFile(cwd);
+
+  // Append to permanent archive first
+  appendToArchive(cwd, title, bullets, sessionId, gitCommit);
+
+  const historyPath = getHistoryPath(cwd);
+  const content = readFileSync(historyPath, 'utf-8');
+
+  const { frontmatter, body } = parseFrontmatter(content);
+  const updatedFrontmatter = updateFrontmatterTimestamp(frontmatter);
+
+  const newEntry = formatEntry(title, bullets);
+
+  // Enforce 250-line limit: trim oldest entries if necessary
+  const MAX_LINES = 250;
+  const frontmatterText = `---\n${updatedFrontmatter}\n---\n`;
+  const fullContent = frontmatterText + newEntry + body;
+  const totalLines = fullContent.split('\n').length;
+
+  let trimmedBody = body;
+  if (totalLines > MAX_LINES) {
+    // Calculate how many lines to keep from body (oldest entries get removed)
+    const frontmatterLines = frontmatterText.split('\n').length;
+    const newEntryLines = newEntry.split('\n').length;
+    const maxBodyLines = MAX_LINES - frontmatterLines - newEntryLines;
+
+    if (maxBodyLines <= 0) {
+      // New entry alone exceeds limit - keep only new entry
+      trimmedBody = '';
+      log(`WARNING: New entry uses ${newEntryLines} lines, removing all old entries`);
+    } else {
+      // Keep most recent entries from body (trim from end, which contains oldest entries)
+      const bodyLines = body.split('\n');
+      trimmedBody = bodyLines.slice(0, maxBodyLines).join('\n');
+      log(`Trimmed history from ${bodyLines.length} to ${maxBodyLines} body lines (total: ${MAX_LINES} lines)`);
+    }
+  }
+
+  const newContent = `---\n${updatedFrontmatter}\n---\n${newEntry}${trimmedBody}`;
+
+  writeFileSync(historyPath, newContent, 'utf-8');
+  log(`Successfully added entry: ${title}`);
+
+  return historyPath;
+}
+
+const server = new Server(
+  {
+    name: 'history',
+    version: '1.0.0',
+  },
+  {
+    capabilities: {
+      tools: {},
+    },
+  }
+);
+
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  log('tools/list request received');
+  return {
+    tools: [
+      {
+        name: 'logHistoryEntry',
+        description: 'Log a history entry to .claude/memory/history.md and archive.jsonl with title and structured bullets',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            title: {
+              type: 'string',
+              description: 'Entry title (e.g., "implemented user authentication system")',
+            },
+            bullets: {
+              type: 'array',
+              description: 'Array of bullet points with optional nested subbullets',
+              items: {
+                type: 'object',
+                properties: {
+                  text: {
+                    type: 'string',
+                    description: 'Bullet point text (e.g., "added AuthProvider component to src/contexts/AuthContext.tsx")',
+                  },
+                  subbullets: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Optional nested details (max 1 level deep)',
+                  },
+                },
+                required: ['text'],
+              },
+            },
+            sessionId: {
+              type: 'string',
+              description: 'Session identifier',
+            },
+            gitCommit: {
+              type: 'string',
+              description: 'Git commit SHA (optional)',
+            },
+          },
+          required: ['title', 'bullets', 'sessionId'],
+        },
+      },
+    ],
+  };
+});
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const cwd = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  log(`tools/call request: ${request.params.name}`);
+  log(`args: ${JSON.stringify(request.params.arguments)}`);
+
+  if (request.params.name === 'logHistoryEntry') {
+    try {
+      log('logHistoryEntry handler executing');
+
+      const { title, bullets, sessionId, gitCommit } = request.params.arguments;
+
+      if (!title || typeof title !== 'string') {
+        throw new Error('title is required and must be a string');
+      }
+
+      if (!Array.isArray(bullets) || bullets.length === 0) {
+        throw new Error('bullets is required and must be a non-empty array');
+      }
+
+      if (!sessionId || typeof sessionId !== 'string') {
+        throw new Error('sessionId is required and must be a string');
+      }
+
+      for (const bullet of bullets) {
+        if (!bullet.text || typeof bullet.text !== 'string') {
+          throw new Error('Each bullet must have a text property that is a string');
+        }
+        if (bullet.subbullets && !Array.isArray(bullet.subbullets)) {
+          throw new Error('bullet.subbullets must be an array if provided');
+        }
+      }
+
+      const historyPath = logHistoryEntry(cwd, title, bullets, sessionId, gitCommit);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Successfully logged history entry "${title}" to ${historyPath} and archive`,
+          },
+        ],
+      };
+    } catch (error) {
+      log(`ERROR: ${error.message}`);
+      log(`Stack: ${error.stack}`);
+      throw error;
+    }
+  }
+
+  throw new Error(`Unknown tool: ${request.params.name}`);
+});
+
+// Start stdio server
+log('MCP server starting...');
+const transport = new StdioServerTransport();
+await server.connect(transport);
+log('MCP server connected successfully');

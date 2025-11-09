@@ -1,0 +1,52 @@
+---
+description: Gather requirements for a new feature and document comprehensive specifications
+argument-hint: [feature name or description]
+---
+
+Define a new feature and produce `docs/plans/[feature-name]/requirements.md` using the template from `pdocs template plan`.
+
+At a high level, the feature is:
+
+$ARGUMENTS
+
+Instructions:
+- Ask targeted questions focusing on: user flow, technical implementation, and constraints.
+- Investigate the codebase in parallel (1-3 agents) if needed to understand current state.
+- If investigations are performed, document each using the template from `pdocs template investigation-topic` and save under `docs/plans/[feature-name]/investigations/`.
+- **CRITICAL:** Resolve ALL technical inferences and clarifications with the user BEFORE creating the requirements document.
+- The final requirements document should contain ONLY confirmed decisions—no open questions or unresolved inferences.
+- When all unknowns are resolved, populate the template exactly and confirm with the user before saving.
+
+Integration with docs/ (init-project):
+- Ensure the requirements reference or create these docs if they don't exist yet:
+  - `docs/product-requirements.md`
+  - `docs/user-flows/[feature-slug].md`
+  - `docs/feature-spec/[feature-slug].md`
+  - `docs/api-contracts.yaml`
+  - `docs/system-design.md`
+  - `docs/data-plan.md`
+
+Output:
+- Save the completed requirements to `docs/plans/[feature-name]/requirements.md`.
+- Ensure the "Relevant Files" section is comprehensive to enable downstream planning.
+
+## Next Steps
+
+After requirements are complete and saved:
+
+```markdown
+✓ Requirements documented: @docs/plans/[feature-name]/requirements.md
+✓ Technical inferences resolved
+✓ Codebase investigations complete (if performed)
+
+**Next Step:** Add this feature to project documentation
+
+Run `/manage-project/start [feature description]` to:
+- Add feature to product requirements (`docs/product-requirements.md`)
+- Create feature specification (`docs/feature-spec/F-##-[slug].yaml`)
+- Optionally add user stories, APIs, and flows
+- Then proceed to implementation with `/manage-project/implement/00-orchestrate F-##`
+
+**Alternative:** If you want to implement immediately without updating project docs:
+- Run `/manage-project/implement/00-orchestrate` and provide the requirements.md file directly
+```

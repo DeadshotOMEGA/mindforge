@@ -1,0 +1,14 @@
+{
+  "issueId": "20251108-001",
+  "issueName": "PostToolUse Hook Error",
+  "completedDate": "2025-11-08T18:12:00Z",
+  "archivedDate": null,
+  "resolutionTime": "30 minutes",
+  "rootCause": "Hook required jq dependency which wasn't installed",
+  "solution": "Made jq optional with bash fallback parsing",
+  "filesModified": 1,
+  "tags": ["hook", "dependency", "error", "resolved"],
+  "movedFrom": "dev/active/issues/20251108-001/",
+  "canArchive": true,
+  "sessionDate": "2025-11-08"
+}
